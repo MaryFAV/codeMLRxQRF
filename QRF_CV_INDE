@@ -1,0 +1,342 @@
+############################################
+# MODELE MLR POUR LA DETECTION DES ARGILES #
+# FAVIERE MARYLINE - STAGE UMR LISAH #######
+# 2024 #####################################
+############################################
+
+
+################
+# PREPARATION ##
+################
+
+rm(list=ls())
+graphics.off()
+
+# LIBRAIRIES #
+library(pls) 
+library(raster)       
+library(rgdal)      
+library(caret)
+library(e1071)
+library(ade4)         
+library(gstat)
+library(snow)
+library(quantregForest)
+library(tibble)
+library(rasterVis)
+library(sf)
+library (ranger)
+library(tuneRanger)
+library(mlr)
+library(cvTools)
+library(dplyr)
+data(SAGA_pal)
+
+
+################
+#   ENTREES    #
+################
+
+# ENREGISTREMENT HEURE SYSTEME AU DEBUT EXECUTION # 
+temps_debut <- Sys.time()
+
+# INITIALISATION DE LA VARIABLE QUI EMPILERA TOUTES LES CARTES EN FONCTION DU NOMBRE ITERATION # 
+FinalMap <- stack() 
+
+# INITIALISATION DE LA LISTE DES ERREURS # 
+metrics_list <- list() 
+
+# MATRICE QUU CONTIENT DES PREDICTIONS DE VALIDATION # 
+NbTest = 30
+NbT = 19
+iteration = 2
+
+SaveClayPredictionVal <- matrix(0, nrow = NbTest, ncol = iteration)
+SaveClayPredictionTest <- matrix(0, nrow = NbT, ncol = iteration)
+
+# TROUVER LES DONNEES S-2 #
+pathS2="Y:/Maryline_Faviere/Data_Inde/1_Data/"
+#pathS2="//147.99.18.48/shared-data/Maryline_Faviere/Data_Inde/1_Data/"
+
+# TROUVER LES MESURES #
+path="Y:/Maryline_Faviere/Data_Inde/1_Data/"  
+#path="//147.99.18.48/shared-data/Maryline_Faviere/Data_Inde/1_Data/"
+
+# CHEMIN DE SORTIE #
+#pathResults="Y:/Maryline_Faviere/Résultats/MLR/Inde_20170424/"
+pathResults="Y:/Maryline_Faviere/RES_STAGE/BERAMBADI/CROSS_VAL/QRF/"
+
+#pathResults="//147.99.18.48/shared-data/Maryline_Faviere/res/"
+
+# DISTANCE DE MAHALANOBIS #
+seuilMD=3.5 
+
+# DATE IMAGE S2 #
+DateImage="20170424"
+
+Property="Clay"
+prop_unite="g.kg-1"
+
+# VALEUR MAX DES PLOTS #
+LimMaxscatterplot=80 
+ntimes <- 10
+nfolds <- 10
+# OUVRIR LES ECHANTILLONS ET PROPRIETES DE SOL #
+PropSoil_NBSS<-read.table(paste(path,"164_3Prop_BM_AOBO.csv",sep=""), row.names=1,head=T) # LECTURE DU .CSV #
+dim(PropSoil_NBSS) # AFFICHAGE DES DIMENSIONS (LIGNES ET COLONNES) #
+head(PropSoil_NBSS)# AFFICHAGE DES PREMIERES LIGNES DU TABLEAU #
+str(PropSoil_NBSS) # AFFICHAGE DE LA STRUCTURE DE L'OBJET #
+
+# EXTRACTION DE LA COLONNE PROPERTY #
+Prop=PropSoil_NBSS[Property]
+
+# CONVERSION DES DONNEES EN DONNEES SPATIALES #
+coordinates(PropSoil_NBSS) <- c("X_UTM_WGS84_43N","Y_UTM_WGS84_43N")
+coord <- coordinates(PropSoil_NBSS)
+
+SavePerfo=matrix(c(0.0),1,14) # CREATION DE LA MATRICE POUR STOCKER LES PERFORMANCES DU MODELE # 
+SavePerfo=as.data.frame(SavePerfo) # CONVERSION DE LA MATRICE EN DATAFRAME # 
+colnames(SavePerfo)=c("nbrData", "nbrOutlier","R2cal","RMSEcal","R2val","RMSEval","RPDval","RPIQval","Biasval", "R2Test", "RMSETest", "RPDTest", "RPIQTest", "BiasTest") # ATTRIBUTION DE NOMS AUX COLONNES # 
+
+# OUVERTURE DE SE #
+setwd(pathS2) # DEFINIR LE REPERTOIRE ACTUEL #
+NameImage=c(paste("bareSoil_S2_",DateImage,sep="")) # CREATION VECTEUR POUR CONTENIR DE NOM DE IMAGE CONCATENE "BARESOIL_S2_" #
+rownames(SavePerfo)=paste(DateImage) # AFFECTION DU NOM ET DATE SPECIFIE COMME NOM DE LIGNE DANS SAVEPERFO # 
+
+namefile=paste(NameImage,".tif",sep="") # CONCATENATION DU NOM DE FICHIER #
+S2 = readGDAL(paste(pathS2,namefile, sep = "")) # LECTURE DES IMAGES RASTER AVEC LA FONCTION READGDAL() # 
+S2Band.bare=stack(S2) # EMPILEMENT DE BANDES AVEC LA FONCTION STACK() #
+
+S3 = raster(paste(pathS2,namefile, sep = "")) # LECTURE DES IMAGES RASTER AVEC LA FONCTION RASTER() #
+SS3Band.bare=stack(S3) # EMPILEMENT DE BANDES A PARTIR DE S3 # 
+
+################################
+#   PREPARATION DES DONNEES    #
+################################
+
+# EXTRACTION DES DONNEES DES PILES DE RASTER # 
+Spectres=extract(S2Band.bare, PropSoil_NBSS) # EXTRACTION DES VALEURS SPECTRALES DES PIXELS DE IMAGE DES POINTS DE SOL DANS PROPSOIL_NBSS # 
+Argile_spectres=data.frame(Spectres) # CREATION DATAFRAME A PARTIR DES VALEURS SPECTRALES EXTRAITES STOCKEE DANS LA VARIABLE PROP #
+
+Argile_spectres$Prop=Prop # AJOUTE UNE COLONNE PROP AU DATAFRAME CONTENANT DES VALEURS DE PROPRIETES DU SOL DE LA VARIABLE PROP # 
+Argile_spectres$coord=coord # AJOUTE UNE COLONN COORD AU DATAFRAME CONTENANT LES COORDONNEES XY DES ECHANTILLONS # 
+
+# REORGANISATION DES COLONNES POUR QUE LES PROPRIETES DU SOL SOIENT LA PREMIERE COLONNE ECT # 
+Argile_spectresTemp=Argile_spectres 
+Argile_spectresTemp[,1]=Argile_spectres[,11]
+Argile_spectresTemp[,2:11]=Argile_spectres[,1:10]
+
+colnames(Argile_spectresTemp)[1]=Property
+colnames(Argile_spectresTemp)[2:11]=colnames(Argile_spectres)[1:10]
+rownames(Argile_spectresTemp)=rownames(Prop)
+
+Argile_spectres=Argile_spectresTemp
+
+# CONVERTIR LES NOMS DES ECHANTILLONS EN VALEUR # 
+Argile_spectres <- rownames_to_column(Argile_spectres, var = "ID")
+
+# AFFICHAGE DES DIMENSIONS DU DATAFRAME ET AFFICHAGE DES PREMIERES LIGNES # 
+print(dim(Argile_spectres))
+head(Argile_spectres)
+
+################
+##### QRF ######
+################
+
+# SUPRESSION DES DEUX DERNIERES COLONNES DE ARGILE_SPECTRES # 
+Argile_spectresQRF <- Argile_spectres[, -ncol(Argile_spectres)]
+
+# RETIRER LES LIGNES AVEC NA # 
+Argile_spectresQRF <- Argile_spectresQRF[complete.cases(Argile_spectresQRF), ]
+
+# EXTRATION ET REDFINITION DES NOMS DES COLONNES # 
+target <- "Clay"       # LA PROPRIETE DE SOL A PREDIRE # 
+Argile_spectresQRF <- as.data.frame(cbind(Argile_spectresQRF[,1], Argile_spectresQRF[,2], Argile_spectresQRF[3:12]))
+names(Argile_spectresQRF) <- c("id", target, paste0("band", 1:10)) # ASSIGNER LES NOMS DES COLONNES # 
+
+# REMPLACER LES ID PAR DES VAEURS NUMERIQUES # 
+Argile_spectresQRF$id <- seq_len(nrow(Argile_spectresQRF))
+
+# AFFICHAGE DES PREMIERES LIGNES # 
+print(head(Argile_spectresQRF))
+
+# CREATION DE LA TACHE DE REGRESSION #
+clay.task <- makeRegrTask(data = Argile_spectresQRF, target = target)
+param <- tuneRanger(clay.task, num.trees = 100, iters = 70, save.file.path = NULL, parameters = list(replace = TRUE))
+
+# CONFIGURATION DE LA VALIDATION CROISEE # 
+ntimes <- 20
+nfolds <- 10
+folds <- cvFolds(nrow(Argile_spectresQRF), K = nfolds, R = ntimes)
+result <- list(rep(NA, nrow(Argile_spectresQRF)))
+
+# CREATION DU STACK POUR LES PREDICTIONS # 
+stackQRF <- stack()
+stack05 <- stack()
+stack50 <- stack()
+stack95 <- stack()
+
+# INITIALISER LE STACK GLOBAL
+global_stack <- stack()
+
+# BOUCLE DE VALIDATION CROISEE #
+for (it in 1:ntimes) {
+  for (fd in 1:nfolds) {
+    calib <- Argile_spectresQRF[!is.element(1:nrow(Argile_spectresQRF), folds$subsets[folds$which == fd, it]), 2:ncol(Argile_spectresQRF)]
+    valid <- Argile_spectresQRF[is.element(1:nrow(Argile_spectresQRF), folds$subsets[folds$which == fd, it]), 2:ncol(Argile_spectresQRF)]
+    valid_id <- Argile_spectresQRF[is.element(1:nrow(Argile_spectresQRF), folds$subsets[folds$which == fd, it]), 1]
+    
+    mymodel <- ranger(data = calib, dependent.variable.name = target, importance = 'permutation', 
+                      mtry = param$recommended.pars$mtry, min.node.size = param$recommended.pars$min.node.size,
+                      sample.fraction = param$recommended.pars$sample.fraction, num.trees = 100, keep.inbag = TRUE, quantreg = TRUE)
+    
+    prediction <- predict(mymodel, valid, type = 'quantiles', quantiles = c(0.05, 0.5, 0.95))$predictions
+    
+    if (fd == 1)
+      res <- cbind(valid_id, valid[, target], prediction)
+    else
+      res <- rbind(res, cbind(valid_id, valid[, target], prediction))
+  }
+  
+  res <- as.data.frame(res)
+  names(res) <- c('Id', "obs", "pred05", "pred50", "pred95")
+  res <- res[order(res$Id), ]
+  result[[it]] <- res
+  
+  # PREDICTIONS SUR LE RASTER STACK # 
+  # Prédictions sur le raster stack
+  S2Band_df <- as.data.frame(S2Band.bare, xy = TRUE)
+  prediction_data <- S2Band_df[, -c(1, 2)]
+  prediction_data_complete <- na.omit(prediction_data)
+  
+  pred_S2Band <- predict(mymodel, data = prediction_data_complete, type = 'quantiles', quantiles = c(0.05, 0.5, 0.95))$predictions
+  S2Band_df$pred <- NA
+  S2Band_df$pred05 <- NA
+  S2Band_df$pred50 <- NA
+  S2Band_df$pred95 <- NA
+  S2Band_df$pred[complete.cases(prediction_data)] <- pred_S2Band[, 2]  # Prédiction principale
+  S2Band_df$pred05[complete.cases(prediction_data)] <- pred_S2Band[, 1]  # Quantile 0.05
+  S2Band_df$pred50[complete.cases(prediction_data)] <- pred_S2Band[, 2]  # Quantile 0.5
+  S2Band_df$pred95[complete.cases(prediction_data)] <- pred_S2Band[, 3]  # Quantile 0.95
+  
+  pred_raster <- rasterFromXYZ(S2Band_df[, c("x", "y", "pred")])
+  pred_raster05 <- rasterFromXYZ(S2Band_df[, c("x", "y", "pred05")])
+  pred_raster50 <- rasterFromXYZ(S2Band_df[, c("x", "y", "pred50")])
+  pred_raster95 <- rasterFromXYZ(S2Band_df[, c("x", "y", "pred95")])
+  
+  stack05 <- stack(stack05, pred_raster05)
+  stack50 <- stack(stack50, pred_raster50)
+  stack95 <- stack(stack95, pred_raster95)
+  
+  # AJOUTER CHAQUE PRÉDICTION AU STACK DE L'ITÉRATION COURANTE
+  if (!is.null(stackQRF)) {
+    stackQRF <- stack(stackQRF, pred_raster)
+  } else {
+    stackQRF <- pred_raster
+  }
+  
+  # AJOUT DE CHEQUE PREDICTIONS AU STACK # 
+  stackQRF <- stack(stackQRF, pred_raster)
+}
+
+output_path <- "//147.99.18.48/shared-data/Maryline_Faviere/RES_STAGE/BERAMBADI/CROSS_VAL/QRF/predictions_all_iterations.tif"
+writeRaster(stackQRF, filename = output_path, format = "GTiff", overwrite = TRUE)
+
+# CALCUL DES MOYENNES DES PREDICTIONS POUR CHAQUE PIXEL
+mean_pred_raster05_QRF <- calc(stack05, fun = mean, na.rm = TRUE)
+mean_pred_raster95_QRF <- calc(stack95, fun = mean, na.rm = TRUE)
+
+# CALCUL DE L'INTERVALLE DE PREDICTION
+pred_interval_raster_QRF <- mean_pred_raster95_QRF - mean_pred_raster05_QRF
+
+# ENREGISTREMENT DES RASTERS
+writeRaster(mean_pred_raster05_QRF, filename = paste0(pathResults, "QRF_", "pred_interval_05.tif"), format = "GTiff") 
+writeRaster(mean_pred_raster95_QRF, filename = paste0(pathResults, "QRF_", "pred_interval_95.tif"), format = "GTiff")
+writeRaster(pred_interval_raster_QRF, filename = paste0(pathResults, "QRF_", "pred_interval_width.tif"), format = "GTiff")
+
+# Initialisation de metrics_list
+metrics_list <- vector("list", ntimes)
+
+# CALCUL DES METRIQUES # 
+perf <- as.data.frame(matrix(NA, ntimes, 6))
+names(perf) <- c("R2", "RMSE", "RPD", "RPIQ", "Biais", "PICP")
+rnd <- 2
+
+for (it in 1:ntimes) {
+  perf$R2[it] <- round(1 - (var(result[[it]]$obs - result[[it]]$pred50) / var(result[[it]]$obs)), 2)
+  perf$RMSE[it] <- round(sqrt(mean((result[[it]]$obs - result[[it]]$pred50)^2)), rnd)
+  interquartile_range <- quantile(result[[it]]$obs, 0.75) - quantile(result[[it]]$obs, 0.25)
+  perf$RPIQ[it] <- round(interquartile_range / perf$RMSE[it], rnd)
+  perf$RPD[it] <- round(sd(result[[it]]$obs) / perf$RMSE[it], rnd)
+  perf$Biais[it] <- round(mean(result[[it]]$obs - result[[it]]$pred50))
+  result[[it]]$cond90 <- ifelse(result[[it]]$obs <= result[[it]]$pred95 & result[[it]]$obs >= result[[it]]$pred05, 1, 0)
+  perf$PICP[it] <- round(100 * sum(result[[it]]$cond90) / nrow(result[[it]]), 2)
+  
+  # Création d'un vecteur contenant les résultats de cette itération
+  metrics <- c(ntimes, perf$R2[it],perf$RMSE[it], perf$RPD[it], perf$RPIQ[it],perf$Biais[it])
+  
+  # Ajout du vecteur à metrics_list
+  metrics_list[[it]] <- metrics
+}
+
+stat_perf <- c(round(mean(perf$R2), rnd), round(sd(perf$R2), rnd), 
+               round(mean(perf$RMSE), rnd), round(sd(perf$RMSE), rnd),
+               round(mean(perf$RPIQ), rnd), round(sd(perf$RPIQ), rnd),
+               round(mean(perf$RPD), rnd), round(sd(perf$RPD), rnd),
+               round(mean(perf$Biais), rnd), round(sd(perf$Biais), rnd), 
+               round(mean(perf$PICP), rnd), round(sd(perf$PICP), rnd))
+names(stat_perf) <- c('mean.R2', "sd.R2", "mean.RMSE", "sd.RMSE", 'mean.RPIQ', "sd.RPIQ","mean.RPD", "sd.RPD", "mean.Biais", "Sd.Biais", "mean.PICP", "sd.PICP")
+
+stat_perf_df <- as.data.frame(t(stat_perf))
+
+write.table(stat_perf_df, file = paste0(pathResults, "QRF_stats", "stats.csv"), sep = "/t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+# SCATTER PLOTS # 
+#it <- 5
+#plot(result[[it]]$obs, result[[it]]$pred, pch = 19, xlab = 'observed', ylab = 'predicted')
+
+#compar = cbind (result[[1]]$obs,result[[1]]$pred50)
+#for (it in (2:20)){  
+#  compar = cbind(compar,result[[it]]$pred50)  
+#}
+#plot(compar[,1], apply(compar[,2:21],1,FUN="mean"),pch=19, xlab = 'observed',ylab='predicted',xlim = c(min(compar[,1]), max(compar[,1])), ylim = c(min(compar[,1]), max(compar[,1])))
+#add = TRUE
+#abline(0,1,col ="green")
+#arrows(compar[,1], (apply(compar,1,mean) - apply(compar,1,sd)), compar[,1], (apply(compar,1,mean) + apply(compar,1,sd)), length=0.05, angle=90, code=3, col="red")
+
+#CA RTE DES MOYENNES DE PREDICTIOSN # 
+mean_pred_raster_QRF <- calc(stackQRF, fun = mean, na.rm = TRUE)
+writeRaster(mean_pred_raster_QRF, filename = paste0(pathResults, "QRF_", "moyenne_BRB.tif"), format = "GTiff") 
+
+# CARTE DE ECART-TYPE # 
+sd_pred_raster_QRF <- calc(stackQRF, fun = sd, na.rm = TRUE)
+writeRaster(sd_pred_raster_QRF, filename = paste0(pathResults, "QRF_", "sd_BRB.tif"), format = "GTiff")
+
+# CARTE DE LA VARIANCE #  
+variance_argileQRF <- calc(stackQRF, var) 
+writeRaster(variance_argileQRF, filename = paste0(pathResults, "QRF_", "variance_BRB.tif"), format = "GTiff") 
+
+# CARTE DU COEFFICIENT DE VARIATIONglobal_stack
+coefficient_variationQRF <- function(stackQRF) {
+  cv <- sd(stackQRF) / mean(stackQRF) * 100
+  return(cv)
+}
+
+cv_rasterQRF <- calc(stackQRF, coefficient_variationQRF) 
+writeRaster(cv_rasterQRF, filename = paste0(pathResults, "QRF_","coeff_variation_BRB.tif"), format = "GTiff") 
+
+
+# ENREGISTREMENT HEURE SYSTEME FIN EXECUTION # 
+temps_fin <- Sys.time()
+
+# CALCUL DE LA DIFFERENCE HEURE SYSTEME #
+temps_ecoule <- temps_fin - temps_debut
+
+# AFFICHAGE DU TEMPS  # 
+temps_ecoule_en_minutes <- as.numeric(temps_ecoule, units = "mins")
+print(paste("Temps écoulé:", round(temps_ecoule_en_minutes, 2), "minutes"))
+
+
+################ END  ################ 
+################ END  ################ 
+################ END  ################ 
