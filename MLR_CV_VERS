@@ -1,0 +1,413 @@
+############################################
+# MODELE MLR POUR LA DETECTION DES ARGILES #
+# FAVIERE MARYLINE - STAGE UMR LISAH #######
+# 2024 #####################################
+############################################
+
+
+################
+# PREPARATION ##
+################
+
+rm(list=ls())
+graphics.off()
+
+# LIBRAIRIES #
+library(pls) 
+library(raster)       
+library(rgdal)      
+library(caret)
+library(e1071)
+library(ade4)         
+library(gstat)
+library(snow)
+library(quantregForest)
+library(tibble)
+library(rasterVis)
+library(sf)
+library (ranger)
+library(tuneRanger)
+library(mlr)
+library(cvTools)
+library(dplyr)
+data(SAGA_pal)
+
+
+################
+#   ENTREES    #
+################
+
+# ENREGISTREMENT HEURE SYSTEME AU DEBUT EXECUTION # 
+temps_debut <- Sys.time()
+
+# INITIALISATION DE LA VARIABLE QUI EMPILERA TOUTES LES CARTES EN FONCTION DU NOMBRE ITERATION # 
+FinalMap <- stack() 
+
+# INITIALISATION DE LA LISTE DES ERREURS # 
+metrics_list <- list() 
+
+pathS2="C:/Users/maryf/Documents/code/data_versailles/"
+#pathS2="//147.99.18.48/shared-data/Maryline_Faviere/Data_Inde/1_Data/"
+
+# TROUVER LES MESURES #
+path="C:/Users/maryf/Documents/code/data_versailles/"  
+#path="//147.99.18.48/shared-data/Maryline_Faviere/Data_Inde/1_Data/"
+
+# CHEMIN DE SORTIE #
+#pathResults="Y:/Maryline_Faviere/Résultats/MLR/Inde_20170424/"
+pathResults="C:/Users/maryf/Documents/CARTES_STAGES/Versailles_CO/CV/MLR/"  
+
+# DISTANCE DE MAHALANOBIS #
+seuilMD=3.5 
+
+# DATE IMAGE S2 #
+DateImage="BGP3"
+
+Property="Carorg"
+prop_unite="g.kg-1"
+
+# VALEUR MAX DES PLOTS #
+LimMaxscatterplot=80 
+
+# Lire le fichier CSV en spécifiant le séparateur décimal
+PropSoil_NBSS <- read.table(paste(path, "placettes_CO.csv", sep = ""), 
+                            row.names = 1, 
+                            head = TRUE, 
+                            sep = ",", 
+                            dec = ".")
+
+# Convertir les valeurs en valeurs numériques
+for (i in 1:ncol(PropSoil_NBSS)) {
+  PropSoil_NBSS[, i] <- as.numeric(as.character(PropSoil_NBSS[, i]))
+}
+
+# Afficher la structure du dataframe
+str(PropSoil_NBSS)
+
+# Transposer le dataframe
+PropSoil_NBSS_t <- t(PropSoil_NBSS)
+
+# Supprimer les lignes contenant NA
+PropSoil_NBSS_t_clean <- PropSoil_NBSS_t[complete.cases(PropSoil_NBSS_t), ]
+
+# Transposer à nouveau pour obtenir le dataframe original sans les colonnes contenant NA
+PropSoil_NBSS <- t(PropSoil_NBSS_t_clean)
+
+# Convertir le résultat en dataframe
+PropSoil_NBSS <- as.data.frame(PropSoil_NBSS)
+
+dim(PropSoil_NBSS) # AFFICHAGE DES DIMENSIONS (LIGNES ET COLONNES) #
+head(PropSoil_NBSS)# AFFICHAGE DES PREMIERES LIGNES DU TABLEAU #
+str(PropSoil_NBSS) # AFFICHAGE DE LA STRUCTURE DE L'OBJET #                   
+
+# EXTRACTION DE LA COLONNE PROPERTY # 
+Prop=PropSoil_NBSS[Property]                            
+
+# CONVERSION DES DONNEES EN DONNEES SPATIALES #
+coordinates(PropSoil_NBSS) <- c("Direct_N","Direct_E")
+coord <- coordinates(PropSoil_NBSS)
+
+SavePerfo=matrix(c(0.0),1,14) # CREATION DE LA MATRICE POUR STOCKER LES PERFORMANCES DU MODELE # 
+SavePerfo=as.data.frame(SavePerfo) # CONVERSION DE LA MATRICE EN DATAFRAME # 
+colnames(SavePerfo)=c("nbrData", "nbrOutlier","R2cal","RMSEcal","R2val","RMSEval","RPDval","RPIQval","Biasval", "R2Test", "RMSETest", "RPDTest", "RPIQTest", "BiasTest") # ATTRIBUTION DE NOMS AUX COLONNES # 
+
+# OUVERTURE DE SE #
+setwd(pathS2) # DEFINIR LE REPERTOIRE ACTUEL #
+NameImage=c(paste("mosaiq_mask_",DateImage,sep="")) # CREATION VECTEUR POUR CONTENIR DE NOM DE IMAGE CONCATENE "BARESOIL_S2_" #
+rownames(SavePerfo)=paste(DateImage) # AFFECTION DU NOM ET DATE SPECIFIE COMME NOM DE LIGNE DANS SAVEPERFO #
+
+namefile=paste(NameImage,".tif",sep="") # CONCATENATION DU NOM DE FICHIER #
+S2 = readGDAL(paste(pathS2,namefile, sep = "")) # LECTURE DES IMAGES RASTER AVEC LA FONCTION READGDAL() # 
+S2Band.bare=stack(S2) # EMPILEMENT DE BANDES AVEC LA FONCTION STACK() #
+
+################################
+#   PREPARATION DES DONNEES    #
+################################
+
+# EXTRACTION DES DONNEES DES PILES DE RASTER # 
+Spectres=extract(S2Band.bare, PropSoil_NBSS) # EXTRACTION DES VALEURS SPECTRALES DES PIXELS DE IMAGE DES POINTS DE SOL DANS PROPSOIL_NBSS # 
+MO_spectres=data.frame(Spectres) # CREATION DATAFRAME A PARTIR DES VALEURS SPECTRALES EXTRAITES STOCKEE DANS LA VARIABLE PROP #
+
+MO_spectres$Prop=Prop # AJOUTE UNE COLONNE PROP AU DATAFRAME CONTENANT DES VALEURS DE PROPRIETES DU SOL DE LA VARIABLE PROP # 
+MO_spectres$coord=coord # AJOUTE UNE COLONN COORD AU DATAFRAME CONTENANT LES COORDONNEES XY DES ECHANTILLONS # 
+
+# REORGANISATION DES COLONNES POUR QUE LES PROPRIETES DU SOL SOIENT LA PREMIERE COLONNE ECT # 
+MO_spectresTemp=MO_spectres 
+MO_spectresTemp[,1]=MO_spectres[,11]
+MO_spectresTemp[,2:11]=MO_spectres[,1:10]
+
+colnames(MO_spectresTemp)[1]=Property
+colnames(MO_spectresTemp)[2:11]=colnames(MO_spectres)[1:10]
+rownames(MO_spectresTemp)=rownames(Prop)
+
+MO_spectres=MO_spectresTemp
+
+# CONVERTIR LES NOMS DES ECHANTILLONS EN VALEUR # 
+MO_spectres <- rownames_to_column(MO_spectres, var = "ID")
+
+# AFFICHAGE DES DIMENSIONS DU DATAFRAME ET AFFICHAGE DES PREMIERES LIGNES # 
+print(dim(MO_spectres))
+head(MO_spectres)
+
+
+################
+##### MLR ######
+################
+
+# SUPRESSION DES DEUX DERNIERES COLONNES DE MO_SPECTRES
+MO_spectresMLR <- MO_spectres[, -ncol(MO_spectres)]
+
+# RETIRER LES LIGNES AVEC NA
+MO_spectresMLR <- MO_spectresMLR[complete.cases(MO_spectresMLR), ]
+
+# EXTRACTION ET REDEFINITION DES NOMS DES COLONNES
+target <- "Clay"
+MO_spectresMLR <- as.data.frame(cbind(MO_spectresMLR[, 1], MO_spectresMLR[, 2], MO_spectresMLR[3:12]))
+names(MO_spectresMLR) <- c("id", target, paste0("band", 1:10))
+
+# REMPLACER LES ID PAR DES VALEURS NUMERIQUES
+MO_spectresMLR$id <- seq_len(nrow(MO_spectresMLR))
+
+# AFFICHAGE DES PREMIERES LIGNES
+print(head(MO_spectresMLR))
+
+# Configuration de la validation croisée
+ntimes <- 20
+nfolds <- 10
+
+# GENERALISATION POUR LA PARTITION DE LA VALIDATION CROISEE #
+folds <- cvFolds(nrow(MO_spectresMLR), K = nfolds, R = ntimes)
+resultMLR <- list(rep(NA, nrow(MO_spectresMLR)))
+
+# CREATION DU STACK POUR LES PREDICTIONS #
+stackMLR <- stack()
+
+# Initialisation de la liste pour stocker les PICP
+PICP_values <- vector("list", ntimes)
+
+# Initialisation du stack pour les prédictions
+stackMLR <- stack()
+
+# Initialisation de la liste pour stocker les PICP
+PICP_values <- vector("list", ntimes)
+
+# Initialisation du stack pour les prédictions
+stackMLR <- stack()
+rnd <- 2
+
+# Initialisation de la liste pour stocker les PICP
+PICP_values <- vector("list", ntimes)
+
+resultMetrics <- vector("list", ntimes)
+
+# Boucle de validation croisée
+for (it in 1:ntimes) {
+  resultMetrics[[it]] <- vector("list", nfolds)
+  
+  for (fd in 1:nfolds) {
+    calib <- MO_spectresMLR[!is.element(1:nrow(MO_spectresMLR), folds$subsets[folds$which == fd, it]), 2:ncol(MO_spectresMLR)]
+    valid <- MO_spectresMLR[is.element(1:nrow(MO_spectresMLR), folds$subsets[folds$which == fd, it]), 2:ncol(MO_spectresMLR)]
+    valid_id <- MO_spectresMLR[is.element(1:nrow(MO_spectresMLR), folds$subsets[folds$which == fd, it]), 1]
+    
+    mymodelMLR <- lm(Clay ~ ., calib) 
+    
+    # Prédiction sur les données de validation
+    prediction <- predict(mymodelMLR, newdata = valid, type = 'response')
+    
+    if (fd == 1) {
+      res <- cbind(valid_id, valid[, target], prediction)
+    } else {
+      res <- rbind(res, cbind(valid_id, valid[, target], prediction))
+    }
+    
+    beginCluster()
+    Mappred_mlr <- clusterR(S2Band.bare, raster::predict, args = list(model= mymodelMLR))
+    endCluster()
+    stackMLR <- stack(stackMLR,Mappred_mlr)
+    
+    # Traitement des résultats
+    resR <- as.data.frame(res)
+    names(resR) <- c('Id', "obs", "pred")
+    resR <- resR[order(resR$Id), ]
+    resultMLR[[it]] <- resR
+    
+    residualsR <- resR$obs - resR$pred
+    R2 <- 1 - sum(residualsR^2) / sum((resR$obs - mean(resR$obs))^2)
+    RMSE <- sqrt(mean(residualsR^2))
+    RPD <- sd(resR$obs) / RMSE
+    interquartile_range <- quantile(resR$obs, 0.75) - quantile(resR$obs, 0.25)
+    RPIQ <- as.numeric(interquartile_range) / RMSE
+    bias <- mean(residualsR)
+    
+    # Stockage des résultats
+    resultMetrics[[it]][[fd]]$R2 <- R2
+    resultMetrics[[it]][[fd]]$RMSE <- RMSE
+    resultMetrics[[it]][[fd]]$bias <- bias
+    resultMetrics[[it]][[fd]]$RPD <- RPD
+    resultMetrics[[it]][[fd]]$RPIQ <- RPIQ
+    
+  }
+  
+  # Traitement des résultats
+  res <- as.data.frame(res)
+  names(res) <- c('Id', "obs", "pred")
+  res <- res[order(res$Id), ]
+  resultMLR[[it]] <- res
+  
+  # Calcul des intervalles de prédiction et du PICP
+  residuals <- res$obs - res$pred
+  alpha <- 0.05  # Niveau de confiance de 95%
+  t_value <- qt(1 - alpha / 2, df = nrow(calib) - length(coef(mymodelMLR)))  # Valeur critique t
+  
+  pred_interval <- t_value * sd(residuals) / sqrt(nrow(valid))  # Intervalle de prédiction
+  
+  lower_bound <- res$pred - pred_interval
+  upper_bound <- res$pred + pred_interval
+  
+  coverage <- (res$obs >= lower_bound) & (res$obs <= upper_bound)
+  coverage <- (res$obs >= lower_bound) & (res$obs <= upper_bound)
+  PICP <- mean(coverage)
+  PICP_values[[it]] <- PICP
+}
+
+## Pour compter le nombre de pixels avec des prédictions <0
+count_pixels_below_zero <- function(raster_layer) {
+  sum(values(raster_layer) < 0, na.rm = TRUE)
+}
+pixels_below_zero <- sapply(1:nlayers(stackMLR), function(i) count_pixels_below_zero(stackMLR[[i]]))
+pixels_below_zero
+
+## Pour calculer le % de pixels avec des prédictions <0
+proportion_pixels_below_zero <- function(raster_layer) {
+  total_pixels <- ncell(raster_layer)
+  negative_pixels <- sum(values(raster_layer) < 0, na.rm = TRUE)
+  return(negative_pixels / total_pixels)
+}
+proportions_below_zero <- sapply(1:nlayers(stackMLR), function(i) proportion_pixels_below_zero(stackMLR[[i]]))
+proportions_below_zero
+
+#Enregistrement du stack final
+writeRaster(stackMLR, filename = paste0(pathResults, "StackMLR_","pred.tif"), format = "GTiff") 
+
+replace_negative_values <- function(x) {
+  x[x < 0] <- 0.001
+  return(x)
+}
+stackMLR_corrected <- calc(stackMLR, fun = replace_negative_values)
+
+#Enregistrement du stack final SANS prédictions négatives
+writeRaster(stackMLR_corrected, filename = paste0(pathResults, "StackMLR_Positif_","pred.tif"), format = "GTiff") 
+
+
+stackMLR <- rastestack("C:/Users/maryf/Documents/CARTES_STAGES/Versailles_CO/CV/MLR/StackMLR_Positif_pred.tif")
+
+# Chemin vers le fichier TIF contenant le raster stack
+chemin <- "C:/Users/maryf/Documents/CARTES_STAGES/Versailles_CO/CV/MLR/StackMLR_Positif_pred.tif"
+
+# Charger le raster stack dans un objet stackMLR
+stackMLR <- stack(chemin)
+
+# Vérifier le contenu de stackMLR
+stackMLR
+
+quantiles_5 <- calc(stackMLR, fun = function(x) quantile(x, probs = 0.05, na.rm = TRUE))
+quantiles_95 <- calc(stackMLR, fun = function(x) quantile(x, probs = 0.95, na.rm = TRUE))
+
+# CALCUL DE L'INTERVALLE DE PREDICTION
+pred_interval_raster_MLR <- quantiles_95 - quantiles_5
+
+# Sauvegarder les résultats en tant que nouvelles rasters
+writeRaster(quantiles_5, filename = paste0(pathResults, "MLR_", "quantile_05.tif"), format = "GTiff") 
+writeRaster(quantiles_95, filename = paste0(pathResults, "MLR_", "quantile_95.tif"), format = "GTiff") 
+
+# Sauvegarder l'intervalle de prédiction
+writeRaster(pred_interval_raster_MLR, filename = paste0(pathResults, "MLR_", "ip.tif"), format = "GTiff") 
+
+
+# Initialisation de metrics_list
+metrics_list <- vector("list", ntimes)
+
+
+####################
+##### ERREURS ######
+####################
+
+# Calcul des moyennes et écarts-types des R²
+R2_values <- unlist(lapply(resultMetrics, function(x) sapply(x, function(y) y$R2)))
+R2_mean <- mean(R2_values)
+R2_sd <- sd(R2_values)
+
+# Calcul des moyennes et écarts-types des RMSE
+RMSE_values <- unlist(lapply(resultMetrics, function(x) sapply(x, function(y) y$RMSE)))
+RMSE_mean <- mean(RMSE_values)
+RMSE_sd <- sd(RMSE_values)
+
+# Calcul des moyennes et écarts-types des RPD
+RPD_values <- unlist(lapply(resultMetrics, function(x) sapply(x, function(y) y$RPD)))
+RPD_mean <- mean(RPD_values)
+RPD_sd <- sd(RPD_values)
+
+# Calcul des moyennes et écarts-types des RPIQ
+RPIQ_values <- unlist(lapply(resultMetrics, function(x) sapply(x, function(y) y$RPIQ)))
+RPIQ_mean <- mean(RPIQ_values)
+RPIQ_sd <- sd(RPIQ_values)
+
+# Calcul des moyennes et écarts-types du biais
+bias_values <- unlist(lapply(resultMetrics, function(x) sapply(x, function(y) y$bias)))
+bias_mean <- mean(bias_values)
+bias_sd <- sd(bias_values)
+
+# Calcul des moyennes et écarts-types des PICP
+PICP_values <- unlist(PICP_values)
+PICP_mean <- mean(PICP_values)
+PICP_sd <- sd(PICP_values)
+
+# Création de la matrice des résultats
+result_matrix <- matrix(c(R2_mean, R2_sd, RMSE_mean, RMSE_sd, RPD_mean, RPD_sd, RPIQ_mean, RPIQ_sd, bias_mean, bias_sd,PICP_mean, PICP_sd),
+                        nrow = 6, byrow = TRUE)
+
+# Ajout des noms de colonnes et de lignes
+colnames(result_matrix) <- c("Mean", "SD")
+rownames(result_matrix) <- c("R2", "RMSE", "RPD", "RPIQ", "Bias", "PICP")
+
+# Conversion de la matrice en data frame pour l'enregistrer en CSV
+result_df <- as.data.frame(result_matrix)
+
+# Sauvegarde de la matrice dans un fichier CSV
+write.table(result_df, file = paste0(pathResults, "result_metrics.csv"), row.names = TRUE, col.names = TRUE)
+
+
+####################
+##### CARTES #######
+####################
+
+#CA RTE DES MOYENNES DE PREDICTIOSN # 
+mean_pred_raster <- calc(stackMLR_corrected, fun = mean, na.rm = TRUE)
+writeRaster(mean_pred_raster, filename = paste0(pathResults, "MLR_", "moyenne_BRB.tif"), format = "GTiff") 
+
+# CARTE DE ECART-TYPE # 
+sd_pred_raster <- calc(stackMLR_corrected, fun = sd, na.rm = TRUE)
+writeRaster(sd_pred_raster, filename = paste0(pathResults, "MLR_", "sd_BRB.tif"), format = "GTiff")
+
+# CARTE DE LA VARIANCE #  
+variance <- calc(stackMLR_corrected, var) 
+writeRaster(variance, filename = paste0(pathResults, "MLR_", "variance_BRB.tif"), format = "GTiff") 
+
+# CARTE DU COEFFICIENT DE VARIATIONglobal_stack
+coefficient_variation <- function(stackMLR_corrected) {
+  cv <- sd(stackMLR_corrected) / mean(stackMLR_corrected) * 100
+  return(cv)
+}
+
+cv_raster <- calc(stackMLR_corrected, coefficient_variation) 
+writeRaster(cv_raster, filename = paste0(pathResults, "MLR_","coeff_variation_BRB.tif"), format = "GTiff") 
+
+# ENREGISTREMENT HEURE SYSTEME FIN EXECUTION # 
+temps_fin <- Sys.time()
+
+# CALCUL DE LA DIFFERENCE HEURE SYSTEME #
+temps_ecoule <- temps_fin - temps_debut
+
+# AFFICHAGE DU TEMPS  # 
+temps_ecoule_en_minutes <- as.numeric(temps_ecoule, units = "mins")
+print(paste("Temps écoulé:", round(temps_ecoule_en_minutes, 2), "minutes"))
